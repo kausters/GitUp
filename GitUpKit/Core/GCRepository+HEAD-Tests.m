@@ -35,8 +35,14 @@ static NSString* _CommitSignature(GCCommit* commit) {
 
 static BOOL _ConfigureSSHSigningWithKeyPath(GCRepository* repository, NSString* keyPath) {
   return [repository writeConfigOptionForLevel:kGCConfigLevel_Local variable:@"commit.gpgsign" withValue:@"true" error:NULL] &&
-         [repository writeConfigOptionForLevel:kGCConfigLevel_Local variable:@"gpg.format" withValue:@"ssh" error:NULL] &&
-         [repository writeConfigOptionForLevel:kGCConfigLevel_Local variable:@"user.signingkey" withValue:keyPath error:NULL];
+         [repository writeConfigOptionForLevel:kGCConfigLevel_Local
+                                      variable:@"gpg.format"
+                                     withValue:@"ssh"
+                                         error:NULL] &&
+         [repository writeConfigOptionForLevel:kGCConfigLevel_Local
+                                      variable:@"user.signingkey"
+                                     withValue:keyPath
+                                         error:NULL];
 }
 
 @implementation GCEmptyRepositoryTests (GCRepository_HEAD)

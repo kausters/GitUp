@@ -59,7 +59,7 @@ static BOOL _ShouldSSHSignCommit(GCRepository* repository, BOOL* shouldSign, NSE
 
   NSString* format = [[repository readConfigOptionForVariable:@"gpg.format" error:NULL] value];
   if (!format.length || ([format caseInsensitiveCompare:@"ssh"] != NSOrderedSame)) {
-    // v1 intentionally supports SSH commit signing only. Preserve existing GitUp behavior for OpenPGP/X.509 configs by creating an unsigned commit.
+    // Only SSH commit signing is currently supported. Preserve existing GitUp behavior for OpenPGP/X.509 configs by creating an unsigned commit.
     *shouldSign = NO;
     return YES;
   }

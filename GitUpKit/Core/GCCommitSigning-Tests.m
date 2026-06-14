@@ -34,16 +34,24 @@ static NSString* _CommitSignature(GCCommit* commit) {
 
 static BOOL _ConfigureSSHSigningWithKeyPath(GCRepository* repository, NSString* keyPath) {
   return [repository writeConfigOptionForLevel:kGCConfigLevel_Local variable:@"commit.gpgsign" withValue:@"true" error:NULL] &&
-         [repository writeConfigOptionForLevel:kGCConfigLevel_Local variable:@"gpg.format" withValue:@"ssh" error:NULL] &&
-         [repository writeConfigOptionForLevel:kGCConfigLevel_Local variable:@"user.signingkey" withValue:keyPath error:NULL];
+         [repository writeConfigOptionForLevel:kGCConfigLevel_Local
+                                      variable:@"gpg.format"
+                                     withValue:@"ssh"
+                                         error:NULL] &&
+         [repository writeConfigOptionForLevel:kGCConfigLevel_Local
+                                      variable:@"user.signingkey"
+                                     withValue:keyPath
+                                         error:NULL];
 }
 
 static NSString* _CreateFakeSSHSigner(NSString* directory, int exitStatus) {
   NSString* path = [directory stringByAppendingPathComponent:[[NSProcessInfo processInfo] globallyUniqueString]];
   NSString* contents = exitStatus == 0 ? @"#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '-----BEGIN SSH SIGNATURE-----' 'fake-signature' '-----END SSH SIGNATURE-----'\n"
-                                      : [NSString stringWithFormat:@"#!/bin/sh\ncat >/dev/null\necho signer failed >&2\nexit %i\n", exitStatus];
+                                       : [NSString stringWithFormat:@"#!/bin/sh\ncat >/dev/null\necho signer failed >&2\nexit %i\n", exitStatus];
   return ([contents writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL] &&
-          [[NSFileManager defaultManager] setAttributes:@{NSFilePosixPermissions : @(0755)} ofItemAtPath:path error:NULL])
+          [[NSFileManager defaultManager] setAttributes:@{NSFilePosixPermissions : @(0755)}
+                                           ofItemAtPath:path
+                                                  error:NULL])
              ? path
              : nil;
 }
