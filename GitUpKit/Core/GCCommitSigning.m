@@ -25,21 +25,38 @@ static NSString* _StringFromTaskOutput(NSData* data) {
   return [[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
 }
 
+static NSString* _RepositoryTaskDirectoryPath(GCRepository* repository) {
+  return repository.workingDirectoryPath ?: repository.repositoryPath;
+}
+
+static NSError* _TaskFailureError(NSString* message, int status, NSData* stdoutData, NSData* stderrData) {
+  NSString* output = _StringFromTaskOutput(stderrData.length ? stderrData : stdoutData);
+  NSString* reason = output.length ? [NSString stringWithFormat:@": %@", output] : @"";
+  return GCNewError(kGCErrorCode_Generic, [NSString stringWithFormat:@"%@ exited with non-zero status (%i)%@", message, status, reason]);
+}
+
+static GCTask* _TaskWithPATH(GCRepository* repository, NSString* executablePath, NSString* path) {
+  GCTask* task = [[GCTask alloc] initWithExecutablePath:executablePath];
+  task.currentDirectoryPath = _RepositoryTaskDirectoryPath(repository);
+  task.additionalEnvironment = @{@"PATH" : path};
+  return task;
+}
+
 static BOOL _ReadConfigBool(GCRepository* repository, const char* variable, BOOL* value, NSError** error) {
   BOOL success = NO;
   git_config* config = NULL;
-  int boolValue = 0;
+  int configValue = 0;
   int status;
 
   CALL_LIBGIT2_FUNCTION_GOTO(cleanup, git_repository_config, &config, repository.private);
-  status = git_config_get_bool(&boolValue, config, variable);
+  status = git_config_get_bool(&configValue, config, variable);
   if (status == GIT_ENOTFOUND) {
     *value = NO;
     success = YES;
     goto cleanup;
   }
   CHECK_LIBGIT2_FUNCTION_CALL(goto cleanup, status, == GIT_OK);
-  *value = boolValue ? YES : NO;
+  *value = configValue ? YES : NO;
   success = YES;
 
 cleanup:
@@ -59,7 +76,8 @@ static BOOL _ShouldSSHSignCommit(GCRepository* repository, BOOL* shouldSign, NSE
 
   NSString* format = [[repository readConfigOptionForVariable:@"gpg.format" error:NULL] value];
   if (!format.length || ([format caseInsensitiveCompare:@"ssh"] != NSOrderedSame)) {
-    // Only SSH commit signing is currently supported. Preserve existing GitUp behavior for OpenPGP/X.509 configs by creating an unsigned commit.
+    // Only SSH commit signing is currently supported.
+    // Preserve existing GitUp behavior for OpenPGP/X.509 configs by creating an unsigned commit.
     *shouldSign = NO;
     return YES;
   }
@@ -71,7 +89,8 @@ static BOOL _ShouldSSHSignCommit(GCRepository* repository, BOOL* shouldSign, NSE
 static NSString* _CommitSigningPATH(GCRepository* repository, NSError** error) {
   static NSString* cachedPATH = nil;
   if (cachedPATH == nil) {
-    cachedPATH = [repository getPATHUsingShell:NSProcessInfo.processInfo.environment[@"SHELL"] error:error] ?: [repository getPATHUsingShell:@"/bin/sh" error:error];
+    NSString* shell = NSProcessInfo.processInfo.environment[@"SHELL"];
+    cachedPATH = [repository getPATHUsingShell:shell error:error] ?: [repository getPATHUsingShell:@"/bin/sh" error:error];
     XLOG_DEBUG_CHECK(cachedPATH);
   }
   return cachedPATH;
@@ -87,9 +106,7 @@ static NSString* _SSHKeyFromDefaultKeyCommand(GCRepository* repository, NSString
     return nil;
   }
 
-  GCTask* task = [[GCTask alloc] initWithExecutablePath:@"/bin/sh"];
-  task.currentDirectoryPath = repository.workingDirectoryPath ?: repository.repositoryPath;
-  task.additionalEnvironment = @{@"PATH" : path};
+  GCTask* task = _TaskWithPATH(repository, @"/bin/sh", path);
   int status;
   NSData* stdoutData;
   NSData* stderrData;
@@ -98,8 +115,7 @@ static NSString* _SSHKeyFromDefaultKeyCommand(GCRepository* repository, NSString
   }
   if (status != 0) {
     if (error) {
-      NSString* output = _StringFromTaskOutput(stderrData.length ? stderrData : stdoutData);
-      *error = GCNewError(kGCErrorCode_Generic, [NSString stringWithFormat:@"SSH signing default key command exited with non-zero status (%i)%@", status, output.length ? [NSString stringWithFormat:@": %@", output] : @""]);
+      *error = _TaskFailureError(@"SSH signing default key command", status, stdoutData, stderrData);
     }
     return nil;
   }
@@ -159,8 +175,7 @@ static NSString* _SSHSigningKeyPath(GCRepository* repository, NSString** tempora
 
   NSString* path = key.stringByExpandingTildeInPath;
   if (!path.absolutePath) {
-    NSString* workingDirectoryPath = repository.workingDirectoryPath ?: repository.repositoryPath;
-    NSString* relativePath = [workingDirectoryPath stringByAppendingPathComponent:path];
+    NSString* relativePath = [_RepositoryTaskDirectoryPath(repository) stringByAppendingPathComponent:path];
     if ([[NSFileManager defaultManager] fileExistsAtPath:relativePath]) {
       path = relativePath;
     }
@@ -186,9 +201,7 @@ static NSString* _SSHSignatureForCommitBuffer(GCRepository* repository, NSData* 
   NSString* program = [[repository readConfigOptionForVariable:@"gpg.ssh.program" error:NULL] value];
   program = program.length ? program.stringByExpandingTildeInPath : @"ssh-keygen";
 
-  GCTask* task = [[GCTask alloc] initWithExecutablePath:@"/usr/bin/env"];
-  task.currentDirectoryPath = repository.workingDirectoryPath ?: repository.repositoryPath;
-  task.additionalEnvironment = @{@"PATH" : path};
+  GCTask* task = _TaskWithPATH(repository, @"/usr/bin/env", path);
   int status;
   NSData* stdoutData;
   NSData* stderrData;
@@ -202,8 +215,7 @@ static NSString* _SSHSignatureForCommitBuffer(GCRepository* repository, NSData* 
   }
   if (status != 0) {
     if (error) {
-      NSString* output = _StringFromTaskOutput(stderrData.length ? stderrData : stdoutData);
-      *error = GCNewError(kGCErrorCode_Generic, [NSString stringWithFormat:@"SSH commit signer exited with non-zero status (%i)%@", status, output.length ? [NSString stringWithFormat:@": %@", output] : @""]);
+      *error = _TaskFailureError(@"SSH commit signer", status, stdoutData, stderrData);
     }
     return nil;
   }
@@ -222,6 +234,7 @@ static NSString* _SSHSignatureForCommitBuffer(GCRepository* repository, NSData* 
 
 GCCommit* GCCreateCommitFromTreeWithOptionalSignature(GCRepository* repository, git_tree* tree, const git_commit** parents, NSUInteger count, const git_signature* author, NSString* message, NSError** error) {
   GCCommit* commit = nil;
+  const git_signature* authorSignature = NULL;
   git_signature* signature = NULL;
   git_commit* newCommit = NULL;
   NSData* cleanedMessage = nil;
@@ -235,6 +248,7 @@ GCCommit* GCCreateCommitFromTreeWithOptionalSignature(GCRepository* repository, 
 
   git_oid oid;
   CALL_LIBGIT2_FUNCTION_GOTO(cleanup, git_signature_default, &signature, repository.private);
+  authorSignature = author ?: signature;
   cleanedMessage = GCCleanedUpCommitMessage(message);
   cleanedMessageBytes = (const char*)cleanedMessage.bytes;
 #if !TARGET_OS_IPHONE
@@ -243,7 +257,7 @@ GCCommit* GCCreateCommitFromTreeWithOptionalSignature(GCRepository* repository, 
   }
 
   if (shouldSign) {
-    CALL_LIBGIT2_FUNCTION_GOTO(cleanup, git_commit_create_buffer, &commitBuffer, repository.private, author ? author : signature, signature, NULL, cleanedMessageBytes, tree, count, parents);
+    CALL_LIBGIT2_FUNCTION_GOTO(cleanup, git_commit_create_buffer, &commitBuffer, repository.private, authorSignature, signature, NULL, cleanedMessageBytes, tree, count, parents);
     commitData = [[NSData alloc] initWithBytes:commitBuffer.ptr length:commitBuffer.size];
     sshSignature = _SSHSignatureForCommitBuffer(repository, commitData, error);
     if (!sshSignature) {
@@ -252,7 +266,7 @@ GCCommit* GCCreateCommitFromTreeWithOptionalSignature(GCRepository* repository, 
     CALL_LIBGIT2_FUNCTION_GOTO(cleanup, git_commit_create_with_signature, &oid, repository.private, commitBuffer.ptr, sshSignature.UTF8String, "gpgsig");
   } else {
 #endif
-    CALL_LIBGIT2_FUNCTION_GOTO(cleanup, git_commit_create, &oid, repository.private, NULL, author ? author : signature, signature, NULL, cleanedMessageBytes, tree, count, parents);
+    CALL_LIBGIT2_FUNCTION_GOTO(cleanup, git_commit_create, &oid, repository.private, NULL, authorSignature, signature, NULL, cleanedMessageBytes, tree, count, parents);
 #if !TARGET_OS_IPHONE
   }
 #endif
@@ -274,6 +288,7 @@ GCCommit* GCCreateCommitFromCommitWithIndexAndOptionalSignature(GCRepository* re
   git_tree* tree = NULL;
   git_commit** parentCommits = NULL;
   unsigned int parentCount = 0;
+  const git_commit** parents = NULL;
 
   git_oid oid;
   CALL_LIBGIT2_FUNCTION_GOTO(cleanup, git_index_write_tree_to, &oid, index, repository.private);
@@ -290,8 +305,9 @@ GCCommit* GCCreateCommitFromCommitWithIndexAndOptionalSignature(GCRepository* re
       CALL_LIBGIT2_FUNCTION_GOTO(cleanup, git_commit_parent, &parentCommits[i], amendedCommit, i);
     }
   }
+  parents = (const git_commit**)parentCommits;
 
-  commit = GCCreateCommitFromTreeWithOptionalSignature(repository, tree, (const git_commit**)parentCommits, parentCount, git_commit_author(amendedCommit), message, error);
+  commit = GCCreateCommitFromTreeWithOptionalSignature(repository, tree, parents, parentCount, git_commit_author(amendedCommit), message, error);
 
 cleanup:
   if (parentCommits) {
