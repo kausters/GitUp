@@ -87,25 +87,17 @@ static BOOL _ShouldSSHSignCommit(GCRepository* repository, BOOL* shouldSign, NSE
 }
 
 static NSString* _CommitSigningPATH(GCRepository* repository, NSError** error) {
-  static NSString* cachedPATH = nil;
-  if (cachedPATH == nil) {
-    NSString* shell = NSProcessInfo.processInfo.environment[@"SHELL"];
-    cachedPATH = [repository getPATHUsingShell:shell error:error] ?: [repository getPATHUsingShell:@"/bin/sh" error:error];
-    XLOG_DEBUG_CHECK(cachedPATH);
-  }
-  return cachedPATH;
+  NSString* shell = NSProcessInfo.processInfo.environment[@"SHELL"];
+  NSString* path = [repository getPATHUsingShell:shell error:error] ?: [repository getPATHUsingShell:@"/bin/sh" error:error];
+  XLOG_DEBUG_CHECK(path);
+  return path;
 }
 
 static BOOL _LooksLikeInlineSSHKey(NSString* key) {
   return [key hasPrefix:@"ssh-"] || [key hasPrefix:@"ecdsa-"] || [key hasPrefix:@"sk-"];
 }
 
-static NSString* _SSHKeyFromDefaultKeyCommand(GCRepository* repository, NSString* command, NSError** error) {
-  NSString* path = _CommitSigningPATH(repository, error);
-  if (!path) {
-    return nil;
-  }
-
+static NSString* _SSHKeyFromDefaultKeyCommand(GCRepository* repository, NSString* command, NSString* path, NSError** error) {
   GCTask* task = _TaskWithPATH(repository, @"/bin/sh", path);
   int status;
   NSData* stdoutData;
@@ -143,7 +135,7 @@ static NSString* _TemporaryKeyFileForInlineSSHKey(NSString* key, NSError** error
   return path;
 }
 
-static NSString* _SSHSigningKeyPath(GCRepository* repository, NSString** temporaryPath, NSError** error) {
+static NSString* _SSHSigningKeyPath(GCRepository* repository, NSString* taskPath, NSString** temporaryPath, NSError** error) {
   NSString* key = [[repository readConfigOptionForVariable:@"user.signingkey" error:NULL] value];
   if (key.length) {
     key = [key stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
@@ -155,7 +147,7 @@ static NSString* _SSHSigningKeyPath(GCRepository* repository, NSString** tempora
       }
       return nil;
     }
-    key = _SSHKeyFromDefaultKeyCommand(repository, command, error);
+    key = _SSHKeyFromDefaultKeyCommand(repository, command, taskPath, error);
     if (!key) {
       return nil;
     }
@@ -184,17 +176,14 @@ static NSString* _SSHSigningKeyPath(GCRepository* repository, NSString** tempora
 }
 
 static NSString* _SSHSignatureForCommitBuffer(GCRepository* repository, NSData* commitBuffer, NSError** error) {
-  NSString* temporaryKeyPath = nil;
-  NSString* keyPath = _SSHSigningKeyPath(repository, &temporaryKeyPath, error);
-  if (!keyPath) {
+  NSString* path = _CommitSigningPATH(repository, error);
+  if (!path) {
     return nil;
   }
 
-  NSString* path = _CommitSigningPATH(repository, error);
-  if (!path) {
-    if (temporaryKeyPath) {
-      [[NSFileManager defaultManager] removeItemAtPath:temporaryKeyPath error:NULL];
-    }
+  NSString* temporaryKeyPath = nil;
+  NSString* keyPath = _SSHSigningKeyPath(repository, path, &temporaryKeyPath, error);
+  if (!keyPath) {
     return nil;
   }
 

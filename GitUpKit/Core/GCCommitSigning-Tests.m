@@ -25,6 +25,13 @@ static BOOL _WriteLocalConfigOption(GCRepository* repository, NSString* variable
   return [repository writeConfigOptionForLevel:kGCConfigLevel_Local variable:variable withValue:value error:NULL];
 }
 
+static BOOL _WriteExecutable(NSString* path, NSString* contents) {
+  if (![contents writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]) {
+    return NO;
+  }
+  return [[NSFileManager defaultManager] setAttributes:@{NSFilePosixPermissions : @(0755)} ofItemAtPath:path error:NULL];
+}
+
 static NSString* _CreateFakeSSHSigner(NSString* directory, int exitStatus) {
   NSString* path = [directory stringByAppendingPathComponent:[[NSProcessInfo processInfo] globallyUniqueString]];
   NSString* contents;
@@ -48,14 +55,7 @@ static NSString* _CreateFakeSSHSigner(NSString* directory, int exitStatus) {
     contents = [lines componentsJoinedByString:@"\n"];
   }
 
-  if (![contents writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:NULL]) {
-    return nil;
-  }
-  NSDictionary* attributes = @{NSFilePosixPermissions : @(0755)};
-  if (![[NSFileManager defaultManager] setAttributes:attributes ofItemAtPath:path error:NULL]) {
-    return nil;
-  }
-  return path;
+  return _WriteExecutable(path, contents) ? path : nil;
 }
 
 static GCCommit* _CreateCommitFromRepositoryIndex(GCRepository* repository, NSString* message, NSError** error) {
@@ -114,6 +114,62 @@ cleanup:
   NSError* error;
   XCTAssertNil(_CreateCommitFromRepositoryIndex(self.repository, @"Missing key", &error));
   XCTAssertTrue([error.localizedDescription containsString:@"user.signingkey"]);
+}
+
+- (void)testCommitSigningRefreshesPATHOncePerOperation {
+  NSString* firstDirectory = [self.temporaryPath stringByAppendingPathComponent:@"first"];
+  NSString* secondDirectory = [self.temporaryPath stringByAppendingPathComponent:@"second"];
+  NSString* pathOutput = [self.temporaryPath stringByAppendingPathComponent:@"signing-path"];
+  NSString* pathLookups = [self.temporaryPath stringByAppendingPathComponent:@"path-lookups"];
+  NSString* shell = [self.temporaryPath stringByAppendingPathComponent:@"path-shell"];
+  NSString* program = @"test-ssh-signer";
+  NSString* defaultKeyCommand = @"test-default-key";
+
+  XCTAssertTrue([[NSFileManager defaultManager] createDirectoryAtPath:firstDirectory withIntermediateDirectories:NO attributes:nil error:NULL]);
+  XCTAssertTrue([[NSFileManager defaultManager] createDirectoryAtPath:secondDirectory withIntermediateDirectories:NO attributes:nil error:NULL]);
+
+  NSString* shellContents = [NSString stringWithFormat:@"#!/bin/sh\nprintf x >> '%@'\n/bin/cat '%@'\n", pathLookups, pathOutput];
+  XCTAssertTrue(_WriteExecutable(shell, shellContents));
+
+  for (NSString* directory in @[ firstDirectory, secondDirectory ]) {
+    NSString* marker = [directory isEqualToString:firstDirectory] ? @"first-signature" : @"second-signature";
+    NSString* signerContents = [NSString stringWithFormat:@"#!/bin/sh\n/bin/cat >/dev/null\nprintf '%%s\\n' '-----BEGIN SSH SIGNATURE-----' '%@' '-----END SSH SIGNATURE-----'\n", marker];
+    XCTAssertTrue(_WriteExecutable([directory stringByAppendingPathComponent:program], signerContents));
+    XCTAssertTrue(_WriteExecutable([directory stringByAppendingPathComponent:defaultKeyCommand],
+                                   @"#!/bin/sh\nprintf 'key::ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPathRefreshKey test@example.com\\n'\n"));
+  }
+
+  XCTAssertTrue(_WriteLocalConfigOption(self.repository, @"commit.gpgsign", @"true"));
+  XCTAssertTrue(_WriteLocalConfigOption(self.repository, @"gpg.format", @"ssh"));
+  XCTAssertTrue(_WriteLocalConfigOption(self.repository, @"gpg.ssh.program", program));
+  XCTAssertTrue(_WriteLocalConfigOption(self.repository, @"gpg.ssh.defaultKeyCommand", defaultKeyCommand));
+
+  const char* previousShellValue = getenv("SHELL");
+  NSString* previousShell = previousShellValue ? [NSString stringWithUTF8String:previousShellValue] : nil;
+  setenv("SHELL", shell.fileSystemRepresentation, 1);
+  @try {
+    XCTAssertTrue([[firstDirectory stringByAppendingString:@"\n"] writeToFile:pathOutput atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    [self updateFileAtPath:@"first-path.txt" withString:@"first path\n"];
+    XCTAssertTrue([self.repository addFileToIndex:@"first-path.txt" error:NULL]);
+    GCCommit* firstCommit = _CreateCommitFromRepositoryIndex(self.repository, @"First PATH", NULL);
+    XCTAssertNotNil(firstCommit);
+    XCTAssertTrue([GCCommitSignature(firstCommit) containsString:@"first-signature"]);
+    XCTAssertEqual([[NSString stringWithContentsOfFile:pathLookups encoding:NSUTF8StringEncoding error:NULL] length], 1);
+
+    XCTAssertTrue([[secondDirectory stringByAppendingString:@"\n"] writeToFile:pathOutput atomically:YES encoding:NSUTF8StringEncoding error:NULL]);
+    [self updateFileAtPath:@"second-path.txt" withString:@"second path\n"];
+    XCTAssertTrue([self.repository addFileToIndex:@"second-path.txt" error:NULL]);
+    GCCommit* secondCommit = _CreateCommitFromRepositoryIndex(self.repository, @"Second PATH", NULL);
+    XCTAssertNotNil(secondCommit);
+    XCTAssertTrue([GCCommitSignature(secondCommit) containsString:@"second-signature"]);
+    XCTAssertEqual([[NSString stringWithContentsOfFile:pathLookups encoding:NSUTF8StringEncoding error:NULL] length], 2);
+  } @finally {
+    if (previousShell) {
+      setenv("SHELL", previousShell.fileSystemRepresentation, 1);
+    } else {
+      unsetenv("SHELL");
+    }
+  }
 }
 
 - (void)testCommitSigningSupportsInlineKeyAndDefaultKeyCommand {
