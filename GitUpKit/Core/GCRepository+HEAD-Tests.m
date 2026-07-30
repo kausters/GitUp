@@ -18,32 +18,9 @@
 #endif
 
 #import "GCTestCase.h"
+#import "GCCommitSigningTestHelpers.h"
 #import <GitUpKit/GCRepository+Utilities.h>
 #import <GitUpKit/GCRepository+Index.h>
-
-static NSString* _CommitSignature(GCCommit* commit) {
-  git_buf buffer = {0};
-  int status = git_commit_header_field(&buffer, commit.private, "gpgsig");
-  if (status != GIT_OK) {
-    git_buf_free(&buffer);
-    return nil;
-  }
-  NSString* signature = [[NSString alloc] initWithBytes:buffer.ptr length:buffer.size encoding:NSUTF8StringEncoding];
-  git_buf_free(&buffer);
-  return signature;
-}
-
-static BOOL _ConfigureSSHSigningWithKeyPath(GCRepository* repository, NSString* keyPath) {
-  return [repository writeConfigOptionForLevel:kGCConfigLevel_Local variable:@"commit.gpgsign" withValue:@"true" error:NULL] &&
-         [repository writeConfigOptionForLevel:kGCConfigLevel_Local
-                                      variable:@"gpg.format"
-                                     withValue:@"ssh"
-                                         error:NULL] &&
-         [repository writeConfigOptionForLevel:kGCConfigLevel_Local
-                                      variable:@"user.signingkey"
-                                     withValue:keyPath
-                                         error:NULL];
-}
 
 @implementation GCEmptyRepositoryTests (GCRepository_HEAD)
 
@@ -143,21 +120,21 @@ static BOOL _ConfigureSSHSigningWithKeyPath(GCRepository* repository, NSString* 
   BOOL keygenSuccess = [keygen runWithArguments:keygenArguments stdin:nil stdout:NULL stderr:NULL exitStatus:&status error:NULL];
   XCTAssertTrue(keygenSuccess);
   XCTAssertEqual(status, 0);
-  XCTAssertTrue(_ConfigureSSHSigningWithKeyPath(self.repository, keyPath));
+  XCTAssertTrue(GCConfigureSSHSigningWithKeyPath(self.repository, keyPath));
 
   GCCommit* emptyCommit = [self.repository createCommitFromHEADWithMessage:@"Signed empty" error:NULL];
   XCTAssertNotNil(emptyCommit);
-  XCTAssertTrue([_CommitSignature(emptyCommit) containsString:@"BEGIN SSH SIGNATURE"]);
+  XCTAssertTrue(GCCommitHasSSHSignature(emptyCommit));
 
   GCCommit* mergeCommit = [self.repository createCommitFromHEADAndOtherParent:self.commitA withMessage:@"Signed merge" error:NULL];
   XCTAssertNotNil(mergeCommit);
-  XCTAssertTrue([_CommitSignature(mergeCommit) containsString:@"BEGIN SSH SIGNATURE"]);
+  XCTAssertTrue(GCCommitHasSSHSignature(mergeCommit));
 
   [self updateFileAtPath:@"hello_world.txt" withString:@"SIGNED AMEND\n"];
   XCTAssertTrue([self.repository addFileToIndex:@"hello_world.txt" error:NULL]);
   GCCommit* amendCommit = [self.repository createCommitByAmendingHEADWithMessage:@"Signed amend" error:NULL];
   XCTAssertNotNil(amendCommit);
-  XCTAssertTrue([_CommitSignature(amendCommit) containsString:@"BEGIN SSH SIGNATURE"]);
+  XCTAssertTrue(GCCommitHasSSHSignature(amendCommit));
 
   NSString* publicKey = [NSString stringWithContentsOfFile:[keyPath stringByAppendingString:@".pub"] encoding:NSUTF8StringEncoding error:NULL];
   NSString* allowedSignersPath = [self.temporaryPath stringByAppendingPathComponent:@"allowed_signers"];
